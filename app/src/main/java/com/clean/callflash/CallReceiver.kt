@@ -7,10 +7,12 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.telephony.TelephonyManager
 import kotlinx.coroutines.*
+import java.util.concurrent.atomic.AtomicBoolean
 
 class CallReceiver : BroadcastReceiver() {
 
     companion object {
+        private val isRinging = AtomicBoolean(false)
         private var flashJob: Job? = null
 
         fun getFlashCameraId(cameraManager: CameraManager): String? {
@@ -21,6 +23,17 @@ class CallReceiver : BroadcastReceiver() {
                 }
             } catch (e: Exception) {
                 null
+            }
+        }
+
+        fun stopFlashing(cameraManager: CameraManager, cameraId: String?) {
+            isRinging.set(false)
+            flashJob?.cancel()
+            flashJob = null
+            if (cameraId != null) {
+                try {
+                    cameraManager.setTorchMode(cameraId, false)
+                } catch (_: Exception) {}
             }
         }
     }
@@ -34,29 +47,32 @@ class CallReceiver : BroadcastReceiver() {
 
         when (state) {
             TelephonyManager.EXTRA_STATE_RINGING -> {
-                if (flashJob?.isActive == true) return
+                // Hvis den allerede blinker, start ikke et nyt loop
+                if (isRinging.getAndSet(true)) return
 
                 val pendingResult = goAsync()
                 flashJob = CoroutineScope(Dispatchers.Default).launch {
                     try {
-                        while (isActive) {
+                        while (isRinging.get() && isActive) {
                             cameraManager.setTorchMode(cameraId, true)
                             delay(300)
+                            if (!isRinging.get() || !isActive) break
                             cameraManager.setTorchMode(cameraId, false)
                             delay(300)
                         }
-                    } catch (e: Exception) {
-                        try { cameraManager.setTorchMode(cameraId, false) } catch (_: Exception) {}
+                    } catch (_: Exception) {
                     } finally {
+                        try {
+                            cameraManager.setTorchMode(cameraId, false)
+                        } catch (_: Exception) {}
                         pendingResult.finish()
                     }
                 }
             }
+
             TelephonyManager.EXTRA_STATE_OFFHOOK, TelephonyManager.EXTRA_STATE_IDLE -> {
-                flashJob?.cancel()
-                try {
-                    cameraManager.setTorchMode(cameraId, false)
-                } catch (_: Exception) {}
+                // Stopper loopet med det samme, uanset om opkaldet besvares eller afsluttes
+                stopFlashing(cameraManager, cameraId)
             }
         }
     }
